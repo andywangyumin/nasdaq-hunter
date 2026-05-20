@@ -333,7 +333,6 @@ def push_pending_report() -> bool:
         log.error("push_pending_report: 推送失败 %s", report_date)
     con.close()
     return ok
-    con.commit()
 
 
 # ══════════════════════════════════════════════════════════════
