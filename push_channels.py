@@ -127,10 +127,10 @@ def _watchlist_bullets(next_watch: str, thresh: int) -> str:
 
 
 def _extract_core_reason(wait_reason: str, next_watch: str) -> str:
-    """从 wait_reason 或 next_watch 提取核心淘汰原因（最多 60 字）"""
+    """从 wait_reason 或 next_watch 提取核心淘汰原因"""
     if wait_reason:
         r = re.sub(r'^(等待原因[：:]?|原因[：:]?|淘汰[：:]?)\s*', '', wait_reason.strip())
-        return r[:60] + ("…" if len(r) > 60 else "")
+        return r
     if next_watch:
         tickers = re.findall(r'([A-Z]{2,6}):', next_watch)
         if tickers:
