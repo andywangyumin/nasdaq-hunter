@@ -319,8 +319,7 @@ def _watchlist_chart_elements(next_watch: str, thresh: int) -> list:
         score      = int(score_m.group(1))
         gap        = score - thresh
         status_raw = re.sub(r'综合分[=＝\s：:]*\d+[，,]?\s*', '', reason).strip()
-        status     = status_raw[:8] + ("…" if len(status_raw) > 8 else "")
-        parsed.append((ticker, score, gap, status))
+        parsed.append((ticker, score, gap, status_raw))
 
     if not parsed:
         return []
@@ -337,11 +336,12 @@ def _watchlist_chart_elements(next_watch: str, thresh: int) -> list:
         else:
             gap_md = "<font color='red'>**{}**</font>".format(gap_str)
 
-        # 摘要文字行（ticker 为 Google Finance 超链接）
-        gf_url = "https://www.google.com/finance/quote/{}:NASDAQ".format(ticker)
-        line1  = "• [**{}**]({}) | 综合分: {} | 距阈值: {} | {}".format(
-            ticker, gf_url, score, gap_md, status)
-        elements.append({"tag": "markdown", "content": line1})
+        # 摘要文字行（ticker 为 Google Finance 超链接）+ 完整原因第二行
+        gf_url  = "https://www.google.com/finance/quote/{}:NASDAQ".format(ticker)
+        line1   = "• [**{}**]({}) | 综合分: {} | 距阈值: {}".format(
+            ticker, gf_url, score, gap_md)
+        content = line1 + ("\n  " + status if status else "")
+        elements.append({"tag": "markdown", "content": content})
 
         # 上传 Finviz 图表并嵌入 img 元素
         img_key = _upload_chart_image(ticker, feishu_token)
