@@ -1,9 +1,10 @@
 # NASDAQ Hunter — 产品需求文档 (PRD)
 
-**版本**: v2.0  
+**版本**: v2.1  
 **日期**: 2026年5月  
-**状态**: 生产运行中（5年回测验证完成，V6.0 Production 参数锁定，全自动推送运行中）  
+**状态**: 生产运行中（V6.0 参数锁定，GitHub Actions 云端全自动推送，Watchlist 折线图已上线）  
 **通知渠道**: Lark Bot Webhook × 2 群组  
+**代码仓库**: https://github.com/andywangyumin/nasdaq-hunter（Public）  
 
 ---
 
@@ -238,8 +239,8 @@ AND 收入增速加速（当季 YoY > 上季 YoY × 1.15）  ← 最关键门控
 
 ```
 Finnhub API  ──┐
-yfinance     ──┤──→ nasdaq_downloader.py ──→ nasdaq_history.db
-               │     (初始下载 + 每日增量)         │
+yfinance     ──┤──→ nasdaq_downloader.py ──→ nasdaq_history.db ←──→ Cloudflare R2
+               │     (初始下载 + 每日增量)         │              (db_sync.py 同步)
                │                                   │
                └──→ scanner_v2.py ────────────────→┘
                      (每日17:30 EST扫描)             │
@@ -258,27 +259,31 @@ yfinance     ──┤──→ nasdaq_downloader.py ──→ nasdaq_history.db
                ┌─────────┴──────────┐               │
           Lark 群 #1            Lark 群 #2           │
    (FEISHU_WEBHOOK)      (FEISHU_WEBHOOK_2)          │
+         Watchlist 折线图（matplotlib 本地生成 → Feishu App API 上传）
 ```
 
 ### 5.2 调度时间线（每日）
 
-| 北京时间 | UTC | 美东时间 | 事件 |
-|---------|-----|---------|------|
-| 05:30（夏令）/ 06:30（冬令）| 21:30/22:30 | 17:30 EST/EDT | **扫描触发**：DB增量刷新 → 全市场扫描 → 报告存DB |
-| **12:00** | **04:00** | 00:00/23:00 | **推送触发**：读DB最新报告 → 同时推送两个Lark群 |
+| 北京时间 | UTC | 美东时间 | 事件 | 触发方式 |
+|---------|-----|---------|------|---------|
+| 05:30（夏令）| 21:30 | 17:30 EDT | **扫描触发**：DB增量刷新 → 全市场扫描 → 报告存DB → 上传DB至R2 | GitHub Actions `daily_scan.yml` |
+| **12:00** | **04:00** | 00:00 | **推送触发**：从R2下载DB → 读最新未推报告 → 推送两个Lark群 → 上传DB至R2 | GitHub Actions `daily_push.yml` |
+
+> **推送节奏**：扫描周一至周五触发，推送周二至周六触发（对应前一日收盘数据）。周日、周一无推送（美股周末休市，无新数据）。
 
 ### 5.3 模块职责
 
 | 文件 | 职责 | 优先级 |
 |------|------|-------|
 | `nasdaq_downloader.py` | 历史初始化 + `daily_refresh()`每日增量（价格/利率/基本面）| P0 |
-| `historical_backtest.py` | 5年走步验证，V6.0 Production 回测引擎 | P0 |
+| `historical_backtest.py` | 5年走步验证，V6.0 Production 回测引擎（本地运行）| P0 |
 | `scanner_v2.py` | 每日扫描 + DNA评分 + Claude报告 + `push_pending_report()` | P0 |
-| `push_channels.py` | Lark Card 2.0 卡片推送（双群组）+ Discord | P0 |
-| `scheduler_v2.py` | 双触发调度：17:30 EST 扫描 + 04:00 UTC 推送 | P0 |
-| `run_scheduler.sh` | 调度器启动脚本（环境变量加载）| P0 |
-| `~/Applications/NasdaqHunter.app` | macOS Login Item，开机自启 | P0 |
-| `data/nasdaq_history.db` | 主数据库（历史+增量统一存储）| P0 数据 |
+| `push_channels.py` | Lark Card 2.0 卡片推送（双群组）+ Watchlist 折线图生成与上传 | P0 |
+| `db_sync.py` | Cloudflare R2 数据库同步（download/upload，供 GitHub Actions 调用）| P0 |
+| `scheduler_v2.py` | 本地调试用调度器（Mac 端，非生产主路径）| P1 |
+| `.github/workflows/daily_scan.yml` | GitHub Actions：每日 21:30 UTC 触发扫描（Mon-Fri）| P0 |
+| `.github/workflows/daily_push.yml` | GitHub Actions：每日 04:00 UTC 触发推送（Tue-Sat）| P0 |
+| `data/nasdaq_history.db` | 主数据库（历史+增量统一存储，Cloudflare R2 持久化）| P0 数据 |
 
 ### 5.4 API 依赖
 
@@ -288,14 +293,19 @@ yfinance     ──┤──→ nasdaq_downloader.py ──→ nasdaq_history.db
 | yfinance（免费）| 日线 OHLCV 历史价格 + 每日增量 | 无限制 | 批量下载 |
 | Anthropic Claude | 生成自然语言报告和投资建议 | 按 token 计费 | claude-sonnet-4-6 |
 | Lark Webhook × 2 | 推送消息卡片到两个用户群 | 无限制（自有）| open.larkoffice.com |
+| Feishu App API | Watchlist 折线图上传（获取 img_key 嵌入卡片）| 无限制 | `/im/v1/images` |
+| Cloudflare R2 | 数据库持久化存储（10 GB 永久免费，零出站费）| 1M ops/月 免费 | S3 兼容 API |
 
-### 5.5 自动化启动机制（macOS，双保险）
+### 5.5 自动化运行机制（GitHub Actions 云端）
 
 | 机制 | 实现 | 作用 |
 |------|------|------|
-| **Login Items** | `~/Applications/NasdaqHunter.app` | 用户登录后自启，继承完整 TCC 权限 |
-| **crontab @reboot** | `crontab -l` | 系统重启后 15 秒备用启动 |
-| 崩溃重启 | `scheduler_v2.py` 自身守护进程逻辑 | 信号/异常后优雅退出，外部重启兜底 |
+| **定时扫描** | `daily_scan.yml` cron `30 21 * * 1-5` | 每周一至周五 21:30 UTC 自动触发 |
+| **定时推送** | `daily_push.yml` cron `0 4 * * 2-6` | 每周二至周六 04:00 UTC 自动触发 |
+| **DB 持久化** | 每次 workflow 开始 download + 结束 upload（`db_sync.py`）| 确保历史数据跨 job 保留 |
+| **失败保护** | workflow 失败 → GitHub 发送邮件通知 | 任何步骤失败均有告警 |
+| **手动触发** | GitHub Actions UI → `workflow_dispatch` | 随时手动执行扫描或推送 |
+| **本地备用** | `scheduler_v2.py` + crontab @reboot（Mac）| 调试/验证用，非生产主路径 |
 
 ---
 
@@ -457,15 +467,16 @@ CREATE TABLE macro_rates (
 | 手动触发 | `python3 scanner_v2.py --push-pending` |
 | 容错 | 失败最多重试 3 次，间隔 1 分钟 |
 
-### F05: 定时调度（`scheduler_v2.py`）
+### F05: 定时调度（GitHub Actions）
 
 | 属性 | 说明 |
 |------|------|
-| 双触发 | 扫描（17:30 EST/EDT）+ 推送（04:00 UTC）两个独立触发时间 |
-| 周末跳过 | 扫描和推送均跳过周六/周日 |
-| 启动补偿 | 重启时检查：错过扫描→立即补扫；错过推送→立即补推 |
-| 进程守护 | macOS Login Items 开机自启；crontab @reboot 备用 |
-| 失败重试 | 扫描最多3次×5分钟间隔；推送最多3次×1分钟间隔 |
+| 扫描触发 | `daily_scan.yml` cron `30 21 * * 1-5`（周一至周五 21:30 UTC = 17:30 EDT）|
+| 推送触发 | `daily_push.yml` cron `0 4 * * 2-6`（周二至周六 04:00 UTC = 北京 12:00）|
+| DB 同步 | 每个 workflow 开始从 R2 下载 DB，结束后上传回 R2（`if: always()` 保证失败也上传）|
+| 手动触发 | GitHub Actions UI → workflow_dispatch，随时可执行 |
+| 失败告警 | 任何步骤失败 → GitHub 自动发邮件到注册邮箱 |
+| 本地备用 | `scheduler_v2.py` 保留供本地调试；时间漂移 bug 已修复（漂移时调用 `_startup_check()` 补跑）|
 
 ### F06: 历史走步验证（`historical_backtest.py`）
 
@@ -482,8 +493,15 @@ CREATE TABLE macro_rates (
 | 推送类型 | 触发条件 | 卡片颜色 | 内容 |
 |---------|---------|---------|------|
 | BUY 信号 | action="BUY" | 红色 🔴 | 扫描统计、分析过程、每只标的（置信度+仓位建议+交易计划+逻辑）、Yahoo Finance 链接 |
-| WAIT 日报 | action="WAIT" | 蓝色（wathet）| 核心指标 column_set（Fed/阈值/扫描数）、扫描结论、Watchlist 子弹列表、操作建议 |
+| WAIT 日报 | action="WAIT" | 蓝色（wathet）| 核心指标 column_set（Fed/阈值/扫描数）、扫描结论、Watchlist（含折线图）、操作建议 |
 | 错误报告 | 扫描失败 | 橙色 🟠 | 错误描述、已扫描数、建议操作 |
+
+**Watchlist 折线图实现**（v2.1 新增）：
+- 从本地 `nasdaq_history.db` 查询最近 180 天收盘价
+- `matplotlib`（Agg 后端）生成深色主题折线图：涨绿跌红，标注当前价格和 6M 涨跌幅
+- 通过 Feishu App API（`/im/v1/images`）上传图片，获取 `img_key` 嵌入卡片
+- 每只 Watchlist 股票格式：第一行「• [Ticker 超链接] | 综合分 | 距阈值」，第二行完整原因，第三行折线图
+- 所需凭证：`FEISHU_APP_ID` + `FEISHU_APP_SECRET`（Feishu 开发者后台，机器人能力已开启）
 
 ---
 
@@ -521,28 +539,44 @@ CREATE TABLE macro_rates (
 
 ### 8.2 手动操作命令速查
 
+**GitHub Actions（云端生产）**：
 ```bash
-# 查看调度器是否运行
-pgrep -fl scheduler_v2
+# 手动触发扫描（GitHub UI）
+# → github.com/andywangyumin/nasdaq-hunter/actions/workflows/daily_scan.yml
+# → Run workflow → Run workflow
 
-# 重启调度器
-pkill -f scheduler_v2
-nohup bash ~/Documents/Nasdaq_Hunter/run_scheduler.sh &
+# 手动触发推送（GitHub UI）
+# → github.com/andywangyumin/nasdaq-hunter/actions/workflows/daily_push.yml
+# → Run workflow → Run workflow
 
+# 部署新代码到生产
+git add -p && git commit -m "..." && git push origin main
+# （GitHub Actions 不会自动重启，push 后等次日 cron 触发，或手动 workflow_dispatch）
+```
+
+**本地调试（Mac）**：
+```bash
 # 立即手动推送今日报告（不等 12:00）
-python3 scanner_v2.py --push-pending
+python3 -c "from scanner_v2 import push_pending_report; push_pending_report()"
 
 # 强制重新扫描
 python3 scanner_v2.py --force
 
-# 测试推送格式
+# 测试推送格式（含 Watchlist 折线图）
 python3 scanner_v2.py --push-test
 
-# 运行历史回测
+# 运行历史回测（本地验证）
 python3 historical_backtest.py
 
-# 实时查看日志
-tail -f ~/Documents/Nasdaq_Hunter/data/scheduler.log
+# 本地调度器（调试用）
+nohup bash run_scheduler.sh &
+tail -f data/scheduler.log
+
+# 手动同步 DB 到 R2
+python3 db_sync.py upload
+
+# 从 R2 下载最新 DB
+python3 db_sync.py download
 ```
 
 ### 8.3 年度维护操作
@@ -589,25 +623,40 @@ tail -f ~/Documents/Nasdaq_Hunter/data/scheduler.log
 ### 9.2 WAIT 日报卡片（蓝色，静默）
 
 ```
-📊 NASDAQ Hunter · 2026-05-17 每日日报
+📊 NASDAQ Hunter · 2026-05-20 每日日报
 ━━━━━━━━━━━━━━━━━━━━━━
-[column_set: Fed Rate X%（中性）| 触发门槛 综合分≥70 | 扫描股票 共N只]
+[column_set: Fed Rate 4.5%（中性）| 触发门槛 综合分≥70 | 扫描股票 共357只]
 ━━━━━━━━━━━━━━━━━━━━━━
 📋 扫描结论
-今日 N只通过 Quality 质检，但均未达到 Signal 触发线（≥70分）。
-[wait_reason]
-[analysis_process 逐行要点]
+• [wait_reason]
+• [analysis_process 要点1]
 ━━━━━━━━━━━━━━━━━━━━━━
-👁️ 重点关注 (Watchlist)
-• TICKER | 综合分: N | 距阈值: ±N | 状态: ...
+👁️ 重点关注
+• [ALAB](Google Finance 链接) | 综合分: 52 | 距阈值: -18
+  高管抛售窗口关闭后可重新评估，基本面强劲若信号消退可入场
+[ALAB 6个月折线图 — 深色背景，绿/红折线，含当前价格和涨跌幅]
+
+• [CRDO](Google Finance 链接) | 综合分: 51 | 距阈值: -19
+  同类情况监测，关注内部人买入信号回归
+[CRDO 6个月折线图]
+
+• [MU](Google Finance 链接) | 综合分: 51 | 距阈值: -19
+  存储周期拐点仍在，等待高管抛售消退后重新评估
+[MU 6个月折线图]
 ━━━━━━━━━━━━━━━━━━━━━━
 💡 操作建议
 • 当前无触发信号，保持空仓或持有现有仓位
 • 关注 Watchlist 中综合分接近阈值的标的
 • 止损纪律：收盘跌破入场价 -20% 立即离场，无例外
-━━━━━━━━━━━━━━━━━━━━━━
-📝 市场总结
 ```
+
+**Watchlist 折线图设计规范**：
+- 尺寸：600×220 px，DPI 130
+- 背景：`#1A1A2E`（深海蓝）
+- 折线：涨 `#0F9D58`（绿），跌 `#DB4437`（红），linewidth=1.8
+- 填充：折线颜色 alpha=0.15 渐变
+- 标题：`{TICKER} — ${price} {±%} (6M)`，白色，左对齐
+- 坐标轴：灰色刻度 `#AAAAAA`，每隔2月一个标签，水平网格虚线
 
 **关键设计原则**：
 - Feishu markdown **不支持** `|---|---|` 表格语法，Watchlist 一律用子弹列表 `•`
@@ -640,11 +689,14 @@ tail -f ~/Documents/Nasdaq_Hunter/data/scheduler.log
 
 | 验收项 | 标准 | 验证方式 |
 |-------|------|---------|
-| 北京时间 12:00 推送 | 每个工作日精确推送，±2 分钟内 | 观察 Lark 群 |
+| 北京时间 12:00 推送 | 每个工作日（周二至周六）精确推送 | 观察 Lark 群 |
 | 双群推送 | 两个群同时收到相同消息 | 对比群消息时间戳 |
-| 推送格式 | BUY/WAIT 卡片无 `\|---|---|` 原始文本 | `--push-test` 验证 |
-| 开机自启 | 重启 Mac 后调度器自动恢复 | 重启后 `pgrep -fl scheduler_v2` |
+| Watchlist 折线图 | 每只 Watchlist 股票下方显示 6M 折线图 | Lark 群查看卡片 |
+| 原因文字完整 | 不截断，完整显示于第二行 | Lark 群查看卡片 |
+| GitHub Actions 触发 | 每日 cron 准时执行，workflow 绿色 | GitHub Actions 页面 |
+| DB R2 同步 | 每次 workflow 后 R2 内 `nasdaq_history.db` 更新 | Cloudflare R2 控制台 |
 | 扫描-推送解耦 | 扫描完成不立即推送，reports.pushed=0 | `sqlite3` 查询 |
+| 手动触发 | `workflow_dispatch` 可随时触发扫描/推送 | GitHub Actions UI |
 
 ---
 
@@ -665,10 +717,13 @@ tail -f ~/Documents/Nasdaq_Hunter/data/scheduler.log
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|---------|
-| Mac 电源关闭 | 扫描/推送无法执行 | Login Items + crontab @reboot 保证上电即恢复 |
+| GitHub Actions 超时（150分钟上限）| 扫描未完成 | Phase 2 约 90 分钟，远低于上限；可手动重跑 |
+| R2 上传失败 | DB 变更丢失 | `if: always()` 保证失败也尝试上传；下次 workflow 从旧版 DB 继续 |
+| Feishu App 图片上传失败 | Watchlist 无折线图 | 文字行仍正常显示，图片降级为无，不影响推送成功 |
 | Finnhub 限流 | Phase 2 耗时延长 | 10秒/只顺序执行，在60次/分钟限额内 |
 | Claude API 超时 | 报告生成失败 | fallback ERROR 报告自动存入 DB |
-| Lark Webhook 失效 | 推送失败 | scheduler 保留3次重试，错误卡推送提示 |
+| Lark Webhook 失效 | 推送失败 | 保留3次重试，失败发送 GitHub 邮件告警 |
+| GitHub Actions 分钟数耗尽 | 扫描无法运行 | 仓库已设为 Public，分钟数无上限 |
 
 ### 11.3 重要免责声明
 
@@ -684,9 +739,10 @@ tail -f ~/Documents/Nasdaq_Hunter/data/scheduler.log
 | v1.1 | 数据层完善 | 5年历史 + nasdaq_history.db + 走步验证 | ✅ 完成 |
 | v1.2 | 模式统一 | 统一数据库 Schema，历史+增量一体化 | ✅ 完成 |
 | v1.3 | 模型调优 | 756组参数网格搜索，精确率 15.8%→71.4%；三档置信度；分析过程推送 | ✅ 完成 |
-| **v2.0** | **全自动化生产** | **V6.0 参数锁定（Alpha +7.6%）；推送-扫描解耦（12:00 北京推送）；双群推送；每日DB自动刷新；macOS 开机自启；WAIT 卡片 column_set 重构** | ✅ **当前版本** |
-| v2.1 | 高DNA快触发 | DNA≥85 时降低 MIN_HIST 从3→1，捕获 ALAB/HIMS 类快速突破 | 下一步 |
-| v2.2 | 市场状态感知 | VIX 集成，高波动期（VIX>25）自动提示降仓，减少系统性回调误判 | 下一步 |
+| v2.0 | 全自动化生产 | V6.0 参数锁定（Alpha +7.6%）；推送-扫描解耦（12:00 北京推送）；双群推送；每日DB自动刷新；macOS 开机自启；WAIT 卡片 column_set 重构 | ✅ 完成 |
+| **v2.1** | **云端服务器化 + 卡片视觉升级** | **GitHub Actions 定时调度（取代本地 Mac）；Cloudflare R2 DB 持久化；Watchlist 折线图（matplotlib 本地生成 + Feishu App 上传）；Ticker Google Finance 超链接；原因文字完整展示；scheduler 时间漂移修复；代码 GitHub 版本管理** | ✅ **当前版本** |
+| v2.2 | 高DNA快触发 | DNA≥85 时降低 MIN_HIST 从3→1，捕获 ALAB/HIMS 类快速突破 | 下一步 |
+| v2.3 | 市场状态感知 | VIX 集成，高波动期（VIX>25）自动提示降仓，减少系统性回调误判 | 下一步 |
 | v3.0 | 多子模型 | 困境反转子模型 + 新股/IPO 专项追踪器 | 持续迭代 |
 
 ### 12.1 已知技术债
