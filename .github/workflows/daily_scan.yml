@@ -33,9 +33,11 @@ jobs:
           import logging, os
           logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
           from dotenv import load_dotenv; load_dotenv()
-          from nasdaq_downloader import daily_refresh
+          from nasdaq_downloader import daily_refresh, init_db as nd_init_db
           from scanner_v2 import run_scan, init_db, already_scanned_today
-          daily_refresh()
+          nd_con = nd_init_db()
+          daily_refresh(nd_con)
+          nd_con.close()
           con = init_db()
           if not already_scanned_today(con):
               con.close()
