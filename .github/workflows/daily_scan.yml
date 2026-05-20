@@ -1,0 +1,61 @@
+name: Daily Scan
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'   # 17:30 EDT (UTC-4, 夏令时) / 22:30 UTC (EST冬令时)
+  workflow_dispatch:            # 支持手动触发
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt boto3
+
+      - name: Download DB from R2
+        run: python3 db_sync.py download
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+
+      - name: Daily refresh + scan
+        run: |
+          python3 -c "
+          import logging, os
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+          from dotenv import load_dotenv; load_dotenv()
+          from nasdaq_downloader import daily_refresh
+          from scanner_v2 import run_scan, init_db, already_scanned_today
+          daily_refresh()
+          con = init_db()
+          if not already_scanned_today(con):
+              con.close()
+              run_scan(force=False)
+          else:
+              print('今天已扫描，跳过')
+              con.close()
+          "
+        env:
+          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_WEBHOOK_2: ${{ secrets.FEISHU_WEBHOOK_2 }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+      - name: Upload DB back to R2
+        if: always()
+        run: python3 db_sync.py upload
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}

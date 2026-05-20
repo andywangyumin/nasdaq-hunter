@@ -1,0 +1,50 @@
+name: Daily Push
+
+on:
+  schedule:
+    - cron: '0 4 * * 2-6'    # 04:00 UTC = 北京时间 12:00（扫描次日推送）
+  workflow_dispatch:
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt boto3
+
+      - name: Download DB from R2
+        run: python3 db_sync.py download
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+
+      - name: Push pending report to Feishu
+        run: |
+          python3 -c "
+          import logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+          from scanner_v2 import push_pending_report
+          push_pending_report()
+          "
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_WEBHOOK_2: ${{ secrets.FEISHU_WEBHOOK_2 }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+      - name: Upload DB back to R2
+        if: always()
+        run: python3 db_sync.py upload
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
