@@ -30,10 +30,17 @@ jobs:
       - name: Push pending report to Feishu
         run: |
           python3 -c "
-          import logging
+          import logging, sys, time
           logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
           from scanner_v2 import push_pending_report
-          push_pending_report()
+          for attempt in range(1, 4):
+              ok = push_pending_report()
+              if ok:
+                  sys.exit(0)
+              logging.warning('推送失败，第 %d 次重试...', attempt)
+              time.sleep(30)
+          logging.error('推送连续失败 3 次，工作流标红')
+          sys.exit(1)
           "
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
