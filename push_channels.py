@@ -296,6 +296,31 @@ def _upload_chart_image(ticker: str, token: str) -> str:
         return ""
 
 
+def _score_trend(ticker: str, current_score: int) -> str:
+    """查询 DB 近期综合分变化，返回趋势标注，如 ↗+16"""
+    try:
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(__file__), "data", "nasdaq_history.db")
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT comp FROM daily_signals WHERE ticker=? ORDER BY scan_date DESC LIMIT 6",
+                (ticker,)
+            ).fetchall()
+        if len(rows) < 2:
+            return ""
+        oldest = rows[-1][0]
+        delta  = current_score - oldest
+        n      = len(rows) - 1
+        arrow  = "↗" if delta > 5 else "↘" if delta < -5 else "→"
+        days   = "{}日".format(n) if n > 1 else "昨"
+        return " {}<font color='{}'>{:+d}</font>({}前)".format(
+            arrow,
+            "green" if delta > 0 else "red" if delta < 0 else "grey",
+            delta, days)
+    except Exception:
+        return ""
+
+
 def _watchlist_chart_elements(next_watch: str, thresh: int) -> list:
     """
     解析 watchlist，返回飞书元素列表。
@@ -337,9 +362,10 @@ def _watchlist_chart_elements(next_watch: str, thresh: int) -> list:
             gap_md = "<font color='red'>**{}**</font>".format(gap_str)
 
         # 摘要文字行（ticker 为 Google Finance 超链接）+ 完整原因第二行
-        gf_url  = "https://www.google.com/finance/quote/{}:NASDAQ".format(ticker)
-        line1   = "• [**{}**]({}) | 综合分: {} | 距阈值: {}".format(
-            ticker, gf_url, score, gap_md)
+        gf_url     = "https://www.google.com/finance/quote/{}:NASDAQ".format(ticker)
+        trend_str  = _score_trend(ticker, score)
+        line1      = "• [**{}**]({}) | 综合分: {}{}| 距阈值: {}".format(
+            ticker, gf_url, score, trend_str, gap_md)
         content = line1 + ("\n  " + status if status else "")
         elements.append({"tag": "markdown", "content": content})
 
