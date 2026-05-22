@@ -151,9 +151,13 @@ def _watchlist_bullets_compact(next_watch: str, thresh: int) -> str:
         next_start = positions[idx + 1][0] - 1 if idx + 1 < len(positions) else len(next_watch)
         reason = next_watch[end:next_start].strip().rstrip(";,，；")
         score_m = re.search(r'(?:综合|综合分|DNA|分数)[=＝\s：:]*(\d+)', reason)
-        if score_m is None:
-            continue  # 无评分则跳过
-        score = int(score_m.group(1))
+        if score_m is not None:
+            score = int(score_m.group(1))
+        else:
+            db_score = _score_from_db(ticker)
+            if db_score is None:
+                continue
+            score = db_score
         gap_str = "{:+d}".format(score - thresh)
         status_raw = re.sub(r'综合分[=＝\s：:]*\d+[，,]?\s*', '', reason).strip()
         status = status_raw[:8] + ("…" if len(status_raw) > 8 else "")
@@ -296,6 +300,21 @@ def _upload_chart_image(ticker: str, token: str) -> str:
         return ""
 
 
+def _score_from_db(ticker: str):
+    """从 daily_signals 查最新综合分，供分数提取兜底（返回 int 或 None）"""
+    try:
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(__file__), "data", "nasdaq_history.db")
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT comp FROM daily_signals WHERE ticker=? ORDER BY scan_date DESC LIMIT 1",
+                (ticker,)
+            ).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 def _score_trend(ticker: str, current_score: int) -> str:
     """查询 DB 近期综合分变化，返回趋势标注，如 ↗+16"""
     try:
@@ -339,9 +358,13 @@ def _watchlist_chart_elements(next_watch: str, thresh: int) -> list:
         next_start = positions[idx + 1][0] - 1 if idx + 1 < len(positions) else len(next_watch)
         reason = next_watch[end:next_start].strip().rstrip(";,，；")
         score_m = re.search(r'(?:综合|综合分|DNA|分数)[=＝\s：:]*(\d+)', reason)
-        if score_m is None:
-            continue
-        score      = int(score_m.group(1))
+        if score_m is not None:
+            score = int(score_m.group(1))
+        else:
+            db_score = _score_from_db(ticker)
+            if db_score is None:
+                continue
+            score = db_score
         gap        = score - thresh
         status_raw = re.sub(r'综合分[=＝\s：:]*\d+[，,]?\s*', '', reason).strip()
         parsed.append((ticker, score, gap, status_raw))
