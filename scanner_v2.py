@@ -954,14 +954,24 @@ def push_telegram(report: dict) -> bool:
 
 
 def push_all(report: dict) -> bool:
-    ok1 = push_pushover(report)
-    ok2 = push_telegram(report)
-    ok3 = push_feishu(report, CFG.get("FEISHU_WEBHOOK",   ""))
-    ok3b = push_feishu(report, CFG.get("FEISHU_WEBHOOK_2", ""))
-    ok4 = push_discord(report, CFG.get("DISCORD_WEBHOOK",  ""))
-    if not any([ok1, ok2, ok3, ok3b, ok4]):
-        log.warning("所有推送渠道均未配置或失败")
-    return ok1 or ok2 or ok3 or ok3b or ok4
+    push_pushover(report)
+    push_telegram(report)
+    push_discord(report, CFG.get("DISCORD_WEBHOOK", ""))
+
+    # Feishu 双群：所有已配置的 webhook 必须全部成功，任一失败返回 False 触发重试
+    feishu_results = []
+    for key in ("FEISHU_WEBHOOK", "FEISHU_WEBHOOK_2"):
+        url = CFG.get(key, "")
+        if url:
+            ok = push_feishu(report, url)
+            if not ok:
+                log.error("%s 推送失败", key)
+            feishu_results.append(ok)
+
+    if not feishu_results:
+        log.warning("未配置任何 Feishu webhook")
+        return False
+    return all(feishu_results)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1127,11 +1137,12 @@ def run_scan(force: bool = False) -> dict:
         log.error(f"报告生成失败: {e}")
         report = {
             "action":      "WAIT",
-            "wait_reason": f"报告生成失败: {e}",
-            "summary":     f"扫描{len(all_results)}只，{len(passed)}只通过门控",
+            "wait_reason": f"Claude 报告生成异常，将在下次扫描重试",
+            "summary":     f"扫描{len(all_results)}只，{len(passed)}只通过门控，报告生成失败",
             "_date":       today,
             "_scanned":    len(all_results),
             "_passed":     len(passed),
+            "_macro":      macro,
         }
         save_report(con, today, "ERROR", report)
 
