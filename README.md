@@ -134,17 +134,64 @@ python3 historical_backtest.py
 
 ## Backtest Results / 回测结果
 
-| Metric | Value |
-|--------|-------|
-| Period | Apr 2021 – May 2026 |
-| Annualized return | +23.9% |
-| QQQ annualized | +16.2% |
-| **Alpha** | **+7.7%** |
-| Precision | 71.4% |
-| Avg lead time to +50% | 146 days |
-| Stop-loss | 20% trailing |
+Walk-forward simulation, Apr 2021 – May 2026 (1,852 days). Initial capital $100,000. Point-in-time fundamentals only — no look-ahead bias.
 
-Backtest uses point-in-time fundamentals to avoid look-ahead bias. Signals are deduplicated within 180-day windows.
+走步回测，2021年4月 – 2026年5月（1852天）。初始资金 $10 万，全程使用当时已公开的基本面数据，无未来数据泄露。
+
+### Portfolio vs QQQ / 策略 vs QQQ 对比
+
+|  | **NASDAQ Hunter** | **QQQ (benchmark)** |
+|--|:-----------------:|:-------------------:|
+| Total return / 总收益 | **+196.7%** | +114.6% |
+| Annualized / 年化收益 | **+23.9%** | +16.2% |
+| Alpha (annualized) | **+7.7%** | — |
+| Starting value | $100,000 | $328.86/share |
+| Ending value | **$296,655** | $705.88/share |
+
+### Signal Quality / 信号质量
+
+| Metric / 指标 | Value / 数值 |
+|---|---|
+| Total signals / 总信号数 | 37 |
+| Deployed positions / 实际建仓 | 31 |
+| Precision (closed) / 精确率 | **71.4%** |
+| True error rate / 真实误判率 | 21.4% |
+| Stop-loss triggers / 触发止损 | 4 (1 market crash) |
+| Avg 12-month return / 平均12月收益 | +25.3% |
+| Avg max return / 平均最大浮盈 | +77.3% |
+| Avg lead time to +50% / 平均提前量 | 146 days |
+
+### Notable Signals / 代表性信号
+
+| Date | Ticker | 12-month Return | Peak Return |
+|------|--------|:--------------:|:-----------:|
+| 2022-11-15 | DUOL | +197.1% | +226.8% |
+| 2026-02-17 | SNDK | — | +164.5% |
+| 2026-03-19 | LOVE | — | +64.8% |  
+| 2024-12-04 | CRDO | +162.2% | +174.1% |
+| 2024-05-14 | DCTH | +118.8% | +156.0% |
+| 2025-03-31 | NUTX | +93.3% | +305.0% |
+| 2024-12-01 | CRWD | +91.0% | +142.0% |
+| 2022-12-09 | MDB | +99.1% | +127.4% |
+| 2022-11-08 | ACMR | +87.2% | +137.8% |
+
+### Signals per Year / 逐年信号数
+
+| Year | Signals |
+|------|---------|
+| 2022 | 15 |
+| 2023 | 1 |
+| 2024 | 3 |
+| 2025 | 3 |
+| 2026 (YTD) | 15 |
+
+Signal frequency is intentionally low — the model only fires on high-conviction setups. In bear years (2022), signals cluster near market bottoms when fundamentals diverge from price.
+
+信号频率有意压低，只在高确信度机会才发信号。熊市年份（2022）信号集中于市场底部附近，即基本面与价格明显背离时。
+
+> **Backtest methodology:** Walk-forward with point-in-time fundamentals, 180-day signal deduplication, 20% trailing stop-loss, macro-adjusted thresholds (Fed rate → composite score threshold 70–88).
+>
+> **回测方法说明：** 走步验证，PIT 基本面数据，180 天去重窗口，20% 追踪止损，宏观联动阈值（联储利率 → 综合分阈值 70–88）。
 
 ---
 
