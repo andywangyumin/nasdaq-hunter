@@ -79,6 +79,8 @@ EPIC_MAX_GM   = 200.0    # 毛利率上限（过滤数据错误）
 MAX_WORKERS  = 4         # Phase2 并发线程数（Finnhub 免费 60req/min，4线程安全）
 P1_DELAY     = 0.38      # Phase1 请求间隔（秒）
 P2_DELAY     = 1.6       # Phase2 每股延迟（并发下每线程）
+DB_PREFILTER_REV = 30.0  # DB预筛：revenue_yoy 下限（两者同时低于才淘汰）
+DB_PREFILTER_GM  = 30.0  # DB预筛：gross_margin 下限
 
 DATA_DIR = Path(__file__).parent / "data"
 DB_PATH  = DATA_DIR / "nasdaq_history.db"
@@ -1068,15 +1070,12 @@ def _process_one(ticker: str, db_path: Path,
 # ══════════════════════════════════════════════════════════════
 #  主扫描流程
 # ══════════════════════════════════════════════════════════════
-def _phase1_from_db(con: sqlite3.Connection, limit: int = 750) -> list:
+def _phase1_from_db(con: sqlite3.Connection) -> list:
     """
     DB-based Phase 1：从 prices + fundamentals 表覆盖全量 NASDAQ，
-    替代原来每只股票调用一次 Finnhub /quote 的做法（节省约 25 分钟）。
-
-    策略：
-      1. 硬编码 TICKERS 中通过基础过滤的股票全部保留（行业覆盖优先）
-      2. 剩余名额从 DB 全量股票中按 revenue_yoy 降序补充
-    合计上限 limit=750（Phase2 @10s/只 = 125 分钟，GitHub Actions 150 分钟内）。
+    替代原来每只股票调用一次 Finnhub /quote 的做法。
+    返回 list of (ticker, price, dv, rev_yoy, gm, has_fundamentals)，无上限。
+    curated TICKERS 优先排前，其余按 revenue_yoy DESC 补充。
 
     基础过滤（与 quality_gate 对齐）：
       • 价格 $5–$2000 | 日成交额 ≥ $1M | 近 5 天有交易
@@ -1084,10 +1083,9 @@ def _phase1_from_db(con: sqlite3.Connection, limit: int = 750) -> list:
     """
     recent = (date.today() - timedelta(days=5)).isoformat()
 
-    # 所有通过基础过滤的 DB 股票（含最新 revenue_yoy）
-    all_rows = con.execute("""
+    rows = con.execute("""
         WITH latest_price AS (
-            SELECT p.ticker, p.close * p.volume AS dv
+            SELECT p.ticker, p.close, p.close * p.volume AS dv
             FROM prices p
             INNER JOIN (
                 SELECT ticker, MAX(date) AS d
@@ -1100,40 +1098,37 @@ def _phase1_from_db(con: sqlite3.Connection, limit: int = 750) -> list:
               AND length(p.ticker) <= 5
         ),
         latest_fund AS (
-            SELECT f.ticker, f.revenue_yoy
+            SELECT f.ticker, f.revenue_yoy, f.gross_margin
             FROM fundamentals f
             INNER JOIN (
                 SELECT ticker, MAX(filing_date) AS fd
                 FROM fundamentals GROUP BY ticker
             ) lf ON f.ticker = lf.ticker AND f.filing_date = lf.fd
         )
-        SELECT lp.ticker, COALESCE(lf.revenue_yoy, 0) AS rev_yoy
+        SELECT lp.ticker, lp.close, lp.dv,
+               lf.revenue_yoy, lf.gross_margin,
+               (lf.ticker IS NOT NULL) AS has_fund
         FROM latest_price lp
         LEFT JOIN latest_fund lf ON lp.ticker = lf.ticker
     """, (recent,)).fetchall()
 
-    if not all_rows:
+    if not rows:
         log.warning("Phase1(DB) 返回空列表，回退到硬编码 TICKERS")
-        return list(TICKERS)
+        return [(t, 0.0, 0.0, None, None, 0) for t in TICKERS]
 
+    db_dict = {r[0]: r for r in rows}
     curated_set = set(TICKERS)
-    db_map = {r[0]: r[1] for r in all_rows}   # ticker → rev_yoy
 
-    # 第一批：精选 TICKERS 中通过过滤的（保证行业覆盖）
-    curated_pass = [t for t in TICKERS if t in db_map]
-
-    # 第二批：DB 中其余股票按 revenue_yoy 降序补充
-    extra = sorted(
-        [(t, ry) for t, ry in db_map.items() if t not in curated_set],
-        key=lambda x: x[1], reverse=True
+    curated = [db_dict[t] for t in TICKERS if t in db_dict]
+    extra   = sorted(
+        [r for r in rows if r[0] not in curated_set],
+        key=lambda r: (r[3] or 0), reverse=True   # sort by rev_yoy DESC
     )
-    extra_tickers = [t for t, _ in extra]
+    combined = list({r[0]: r for r in curated + extra}.values())
 
-    combined = curated_pass + extra_tickers
-    result = list(dict.fromkeys(combined))[:limit]   # 去重 + 截断
     log.info("Phase1(DB): 精选=%d + 扩展=%d = %d 只（DB总量=%d）",
-             len(curated_pass), len(result) - len(curated_pass), len(result), len(db_map))
-    return result
+             len(curated), len(combined) - len(curated), len(combined), len(db_dict))
+    return combined
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1160,25 +1155,75 @@ def run_scan(force: bool = False) -> dict:
     log.info(f"Fed={macro['fedRate']}% | {macro['regime']} | 阈值={mthresh['threshold']}")
 
     # ── Phase 1: DB 初筛（全量 NASDAQ，无 Finnhub API 调用）────
-    p1_pass = _phase1_from_db(con)
-    log.info("Phase1(DB)完成: %d 只进入 Phase2", len(p1_pass))
+    p1_rows = _phase1_from_db(con)
+    log.info("Phase1(DB)完成: %d 只通过基础过滤", len(p1_rows))
+
+    # ── Phase 2a: DB 基本面预筛（智能分配 Finnhub 配额）────────────
+    # 优先级：① 硬编码精选（不预筛）→ ② 非精选高质量基本面 → ③ 无基本面高成交量补位
+    # 规则：非精选 AND 有基本面 AND rev_yoy<30% AND GM<30% → 直接淘汰写库
+    # 无基本面（含新IPO）→ 按日成交额排序，填满剩余名额（PHASE2_CAP - 已选）
+    PHASE2_CAP = 750   # Phase2 上限：@10s/只 = 125 min，GitHub Actions 150 min 内
+    curated_set = set(TICKERS)
+
+    curated_cands  = []  # 精选股：不预筛，直接进 Finnhub
+    quality_cands  = []  # 非精选、基本面达标
+    no_fund_pool   = []  # 无基本面：(ticker, dv, price)，按 dv 排序后补位
+    skip_rows      = []  # 淘汰：(ticker, price, rev_yoy, gm)
+
+    for ticker, price, dv, rev_yoy, gm, has_fund in p1_rows:
+        if ticker in curated_set:
+            curated_cands.append(ticker)
+        elif not has_fund or rev_yoy is None or gm is None:
+            no_fund_pool.append((ticker, dv, price))
+        elif rev_yoy < DB_PREFILTER_REV and gm < DB_PREFILTER_GM:
+            skip_rows.append((ticker, price, rev_yoy, gm))
+        else:
+            quality_cands.append(ticker)
+
+    # 剩余配额给无基本面股（按日成交额降序，优先覆盖新IPO和大市值股）
+    remaining_cap = max(0, PHASE2_CAP - len(curated_cands) - len(quality_cands))
+    no_fund_pool.sort(key=lambda x: x[1], reverse=True)   # sort by dv DESC
+    no_fund_selected = [t for t, dv, _ in no_fund_pool[:remaining_cap]]
+    no_fund_skipped  = [(t, p, None, None) for t, _, p in no_fund_pool[remaining_cap:]]
+
+    p2_candidates = curated_cands + quality_cands + no_fund_selected
+    skip_rows.extend(no_fund_skipped)
+
+    log.info("Phase2a(DB预筛): 精选=%d 质量=%d 无基本面补位=%d | 跳过=%d（含无基本面淘汰=%d）",
+             len(curated_cands), len(quality_cands), len(no_fund_selected),
+             len(skip_rows), len(no_fund_skipped))
+
+    fed_rate_val = macro.get("fedRate", 0.0)
+    for ticker, price, rev_yoy, gm in skip_rows:
+        if rev_yoy is not None and gm is not None:
+            fail = f"DB预筛淘汰(rev={rev_yoy:.0f}%<{DB_PREFILTER_REV:.0f}%, GM={gm:.0f}%<{DB_PREFILTER_GM:.0f}%)"
+        else:
+            fail = "DB预筛淘汰(无基本面数据，成交额不足进入配额)"
+        stop_price = round(price * (1 - STOP_LOSS), 2) if price else None
+        con.execute(
+            "INSERT OR REPLACE INTO daily_signals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ticker, today, None, None, None, mthresh["threshold"], 0,
+             price, stop_price, fed_rate_val, gm, rev_yoy, None, None,
+             fail, "scanner")
+        )
+    con.commit()
 
     # ── Phase 2: 顺序深度评分（避免并发导致的SQLite冲突和Finnhub限流）──
-    log.info("Phase2: 深度评分 %d 只（顺序执行，稳定可靠）…", len(p1_pass))
+    log.info("Phase2: 深度评分 %d 只（顺序执行，稳定可靠）…", len(p2_candidates))
     all_results = []
 
-    for j, ticker in enumerate(p1_pass):
-        result = _process_one(ticker, DB_PATH, today, mthresh, macro.get("fedRate", 0.0))
+    for j, ticker in enumerate(p2_candidates):
+        result = _process_one(ticker, DB_PATH, today, mthresh, fed_rate_val)
         if result:
             all_results.append(result)
 
         done = j + 1
         passed_so_far = sum(1 for r in all_results if r["all_gates"])
-        if done % 10 == 0 or done == len(p1_pass):
-            log.info("  P2 %d/%d | 通过门控: %d", done, len(p1_pass), passed_so_far)
+        if done % 10 == 0 or done == len(p2_candidates):
+            log.info("  P2 %d/%d | 通过门控: %d", done, len(p2_candidates), passed_so_far)
 
         # 顺序请求：8个接口/只，间隔10秒 → 约48 req/min，安全在60限制内
-        if j < len(p1_pass) - 1:
+        if j < len(p2_candidates) - 1:
             time.sleep(10)
 
     all_results.sort(key=lambda x: x["comp"], reverse=True)
