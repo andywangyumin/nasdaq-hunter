@@ -1,8 +1,8 @@
 # NASDAQ Hunter — 产品需求文档 (PRD)
 
-**版本**: v2.1  
+**版本**: v2.2  
 **日期**: 2026年5月  
-**状态**: 生产运行中（V6.0 参数锁定，GitHub Actions 云端全自动推送，Watchlist 折线图已上线）  
+**状态**: 生产运行中（V6.0 参数锁定，GitHub Actions 云端全自动推送，Watchlist 折线图 + 趋势分变化已上线）  
 **通知渠道**: Lark Bot Webhook × 2 群组  
 **代码仓库**: https://github.com/andywangyumin/nasdaq-hunter（Public）  
 
@@ -301,9 +301,10 @@ yfinance     ──┤──→ nasdaq_downloader.py ──→ nasdaq_history.db
 | 机制 | 实现 | 作用 |
 |------|------|------|
 | **定时扫描** | `daily_scan.yml` cron `30 21 * * 1-5` | 每周一至周五 21:30 UTC 自动触发 |
-| **定时推送** | `daily_push.yml` cron `0 4 * * 2-6` | 每周二至周六 04:00 UTC 自动触发 |
+| **定时推送** | `daily_push.yml` cron `0 4 * * 2-6` | 每周二至周六 04:00 UTC 自动触发，失败 3 次重试后标红告警 |
 | **DB 持久化** | 每次 workflow 开始 download + 结束 upload（`db_sync.py`）| 确保历史数据跨 job 保留 |
 | **失败保护** | workflow 失败 → GitHub 发送邮件通知 | 任何步骤失败均有告警 |
+| **防停用** | `keepalive.yml` cron `0 0 1 * *`，每月 1 日自动空提交 | 防止 GitHub 60 天不活跃停用 scheduled workflow |
 | **手动触发** | GitHub Actions UI → `workflow_dispatch` | 随时手动执行扫描或推送 |
 | **本地备用** | `scheduler_v2.py` + crontab @reboot（Mac）| 调试/验证用，非生产主路径 |
 
@@ -465,7 +466,7 @@ CREATE TABLE macro_rates (
 | 推送内容 | DB 中最新 `pushed=0` 报告；若已全部推过则重推最新一条 |
 | 推送目标 | Lark 群 #1（FEISHU_WEBHOOK）+ Lark 群 #2（FEISHU_WEBHOOK_2）同时推送 |
 | 手动触发 | `python3 scanner_v2.py --push-pending` |
-| 容错 | 失败最多重试 3 次，间隔 1 分钟 |
+| 容错 | GitHub Actions 内失败自动重试 3 次，每次间隔 30 秒；3 次全失败 → workflow 标红 → GitHub 邮件告警 |
 
 ### F05: 定时调度（GitHub Actions）
 
@@ -500,8 +501,13 @@ CREATE TABLE macro_rates (
 - 从本地 `nasdaq_history.db` 查询最近 180 天收盘价
 - `matplotlib`（Agg 后端）生成深色主题折线图：涨绿跌红，标注当前价格和 6M 涨跌幅
 - 通过 Feishu App API（`/im/v1/images`）上传图片，获取 `img_key` 嵌入卡片
-- 每只 Watchlist 股票格式：第一行「• [Ticker 超链接] | 综合分 | 距阈值」，第二行完整原因，第三行折线图
+- 每只 Watchlist 股票格式：第一行「• [Ticker 超链接] | 综合分 ↗+16(5日前) | 距阈值」，第二行完整原因，第三行折线图
 - 所需凭证：`FEISHU_APP_ID` + `FEISHU_APP_SECRET`（Feishu 开发者后台，机器人能力已开启）
+
+**Watchlist 综合分趋势标注**（v2.2 新增）：
+- 查询 `daily_signals` 表近 6 次扫描记录，对比最新分与最早可用记录的差值
+- 格式：`综合分: 52 ↗+16(5日前)`，delta 正值绿色，负值红色，±5 以内显示 →（持平）
+- 解决多天相同 Watchlist 报告导致用户麻木的问题，每天都能看到分数的动态变化
 
 ---
 
@@ -632,15 +638,15 @@ python3 db_sync.py download
 • [analysis_process 要点1]
 ━━━━━━━━━━━━━━━━━━━━━━
 👁️ 重点关注
-• [ALAB](Google Finance 链接) | 综合分: 52 | 距阈值: -18
+• [ALAB](Google Finance 链接) | 综合分: 52 ↗+16(5日前) | 距阈值: -18
   高管抛售窗口关闭后可重新评估，基本面强劲若信号消退可入场
 [ALAB 6个月折线图 — 深色背景，绿/红折线，含当前价格和涨跌幅]
 
-• [CRDO](Google Finance 链接) | 综合分: 51 | 距阈值: -19
+• [CRDO](Google Finance 链接) | 综合分: 51 ↗+15(5日前) | 距阈值: -19
   同类情况监测，关注内部人买入信号回归
 [CRDO 6个月折线图]
 
-• [MU](Google Finance 链接) | 综合分: 51 | 距阈值: -19
+• [MU](Google Finance 链接) | 综合分: 51 ↗+16(5日前) | 距阈值: -19
   存储周期拐点仍在，等待高管抛售消退后重新评估
 [MU 6个月折线图]
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -693,6 +699,7 @@ python3 db_sync.py download
 | 双群推送 | 两个群同时收到相同消息 | 对比群消息时间戳 |
 | Watchlist 折线图 | 每只 Watchlist 股票下方显示 6M 折线图 | Lark 群查看卡片 |
 | 原因文字完整 | 不截断，完整显示于第二行 | Lark 群查看卡片 |
+| Watchlist 趋势标注 | 综合分旁显示 ↗/→/↘ 及带颜色 delta | Lark 群查看卡片 |
 | GitHub Actions 触发 | 每日 cron 准时执行，workflow 绿色 | GitHub Actions 页面 |
 | DB R2 同步 | 每次 workflow 后 R2 内 `nasdaq_history.db` 更新 | Cloudflare R2 控制台 |
 | 扫描-推送解耦 | 扫描完成不立即推送，reports.pushed=0 | `sqlite3` 查询 |
@@ -722,7 +729,7 @@ python3 db_sync.py download
 | Feishu App 图片上传失败 | Watchlist 无折线图 | 文字行仍正常显示，图片降级为无，不影响推送成功 |
 | Finnhub 限流 | Phase 2 耗时延长 | 10秒/只顺序执行，在60次/分钟限额内 |
 | Claude API 超时 | 报告生成失败 | fallback ERROR 报告自动存入 DB |
-| Lark Webhook 失效 | 推送失败 | 保留3次重试，失败发送 GitHub 邮件告警 |
+| Lark Webhook 失效 | 推送失败 | 30秒间隔自动重试 3 次；全部失败后 workflow 退出码 1 → GitHub 邮件告警 |
 | GitHub Actions 分钟数耗尽 | 扫描无法运行 | 仓库已设为 Public，分钟数无上限 |
 
 ### 11.3 重要免责声明
@@ -740,9 +747,10 @@ python3 db_sync.py download
 | v1.2 | 模式统一 | 统一数据库 Schema，历史+增量一体化 | ✅ 完成 |
 | v1.3 | 模型调优 | 756组参数网格搜索，精确率 15.8%→71.4%；三档置信度；分析过程推送 | ✅ 完成 |
 | v2.0 | 全自动化生产 | V6.0 参数锁定（Alpha +7.6%）；推送-扫描解耦（12:00 北京推送）；双群推送；每日DB自动刷新；macOS 开机自启；WAIT 卡片 column_set 重构 | ✅ 完成 |
-| **v2.1** | **云端服务器化 + 卡片视觉升级** | **GitHub Actions 定时调度（取代本地 Mac）；Cloudflare R2 DB 持久化；Watchlist 折线图（matplotlib 本地生成 + Feishu App 上传）；Ticker Google Finance 超链接；原因文字完整展示；scheduler 时间漂移修复；代码 GitHub 版本管理** | ✅ **当前版本** |
-| v2.2 | 高DNA快触发 | DNA≥85 时降低 MIN_HIST 从3→1，捕获 ALAB/HIMS 类快速突破 | 下一步 |
-| v2.3 | 市场状态感知 | VIX 集成，高波动期（VIX>25）自动提示降仓，减少系统性回调误判 | 下一步 |
+| v2.1 | 云端服务器化 + 卡片视觉升级 | GitHub Actions 定时调度（取代本地 Mac）；Cloudflare R2 DB 持久化；Watchlist 折线图（matplotlib 本地生成 + Feishu App 上传）；Ticker Google Finance 超链接；原因文字完整展示；scheduler 时间漂移修复；代码 GitHub 版本管理 | ✅ 完成 |
+| **v2.2** | **推送可靠性 + Watchlist 信息密度** | **推送失败自动重试 3 次（30s 间隔），全失败标红邮件告警；每月 keepalive 防 60 天停用；Watchlist 综合分趋势标注（↗+16 绿色/↘红色）；淘汰核心原因完整展示（去除 60 字截断）** | ✅ **当前版本** |
+| v2.3 | 高DNA快触发 | DNA≥85 时降低 MIN_HIST 从3→1，捕获 ALAB/HIMS 类快速突破 | 下一步 |
+| v2.4 | 市场状态感知 | VIX 集成，高波动期（VIX>25）自动提示降仓，减少系统性回调误判 | 下一步 |
 | v3.0 | 多子模型 | 困境反转子模型 + 新股/IPO 专项追踪器 | 持续迭代 |
 
 ### 12.1 已知技术债
