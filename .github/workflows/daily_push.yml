@@ -1,8 +1,8 @@
 name: Daily Push
 
 on:
-  schedule:
-    - cron: '0 10 * * 2-6'   # 10:00 UTC = 北京时间 18:00（扫描次日推送）
+  # schedule:
+  #   - cron: '0 10 * * 2-6'   # 10:00 UTC = 北京时间 18:00（扫描次日推送）— 已暂停线上运行
   workflow_dispatch:
 
 jobs:

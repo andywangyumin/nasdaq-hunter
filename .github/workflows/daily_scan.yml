@@ -1,8 +1,8 @@
 name: Daily Scan
 
 on:
-  schedule:
-    - cron: '30 21 * * 1-5'   # 17:30 EDT (UTC-4, 夏令时) / 22:30 UTC (EST冬令时)
+  # schedule:
+  #   - cron: '30 21 * * 1-5'   # 17:30 EDT (UTC-4, 夏令时) / 22:30 UTC (EST冬令时) — 已暂停线上运行
   workflow_dispatch:            # 支持手动触发
 
 jobs:

@@ -1,8 +1,8 @@
 name: Keepalive
 
 on:
-  schedule:
-    - cron: '0 0 1 * *'  # 每月1日 UTC 00:00，防止 GitHub 60天不活跃停用 workflows
+  # schedule:
+  #   - cron: '0 0 1 * *'  # 每月1日 UTC 00:00，防止 GitHub 60天不活跃停用 workflows — 已暂停线上运行
   workflow_dispatch:
 
 jobs:
